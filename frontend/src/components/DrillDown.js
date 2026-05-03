@@ -5,6 +5,7 @@ import {
 } from 'recharts';
 import api from '../utils/api';
 
+
 const SEVERITY_COLORS = {
   HEALTHY:  '#00ff88',
   MODERATE: '#ffd700',
