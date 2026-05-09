@@ -96,3 +96,30 @@ print(f"Module 2 - Rework           ACC: {acc2*100:.2f}%")
 print(f"Module 3 - Discharge Delay  MAE: {mae3:.2f} mins")
 print(f"Module 4 - Transfer Delay   ACC: {acc4*100:.2f}%")
 print(f"Module 5 - Overall Risk     ACC: {acc5*100:.2f}%")
+# ── FIX 5: DATA-DRIVEN DEBT WEIGHTS ──
+print("\n--- Computing Data-Driven Debt Weights ---")
+importance = model5.feature_importances_
+feature_names_all = list(X5.columns)
+importance_dict = dict(zip(feature_names_all, importance))
+total = sum(importance_dict.values())
+learned_weights = {k: round(v/total, 4) for k, v in importance_dict.items()}
+print("Learned weights from XGBoost feature importance:")
+for k, v in sorted(learned_weights.items(), key=lambda x: x[1], reverse=True):
+    print(f"  {k}: {v}")
+import json
+with open("models/learned_weights.json", "w") as f:
+    json.dump(learned_weights, f, indent=2)
+print("Saved learned_weights.json")
+
+# ── FIX 6: ISOLATION FOREST BOTTLENECK DETECTOR ──
+print("\n--- Training Isolation Forest (Bottleneck Detector) ---")
+from sklearn.ensemble import IsolationForest
+delay_cols_iso = ['Admission_Delay_Min', 'TAT_Min', 'Bed_Delay_Min',
+                  'Wait_Time_Min', 'Rework_Count', 'Num_Transfers']
+iso = IsolationForest(contamination=0.1, random_state=42)
+iso.fit(df[delay_cols_iso])
+with open("models/model_anomaly.pkl", "wb") as f:
+    pickle.dump(iso, f)
+print("Isolation Forest trained and saved as model_anomaly.pkl")
+n_anomalies = sum(iso.predict(df[delay_cols_iso]) == -1)
+print(f"Anomalies detected in dataset: {n_anomalies} out of {len(df)} ({n_anomalies/len(df)*100:.1f}%)")

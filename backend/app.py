@@ -6,6 +6,7 @@ import numpy as np
 import os
 import datetime
 import math
+import shap
 
 app = Flask(__name__)
 CORS(app, resources={r"/api/*": {"origins": "*"}})
@@ -29,9 +30,28 @@ print("All models loaded!")
 # ── LOAD DATASET ──
 df_global = pd.read_csv(os.path.join(BASE, "hospital_synthetic_data.csv"))
 
-def calculate_debt_score(wait, tat, bed_delay, admission_delay, transfers, process_steps, loop_count, rework):
+# ── PRECOMPUTE CORRELATION MATRIX (Fix 4) ──
+delay_cols_cascade = ['Admission_Delay_Min', 'TAT_Min', 'Bed_Delay_Min',
+                      'Wait_Time_Min', 'Rework_Count', 'Num_Transfers']
+corr_matrix = df_global[delay_cols_cascade].corr()
+thresholds_cascade = df_global[delay_cols_cascade].quantile(0.75).to_dict()
+
+# ── PRECOMPUTE SHAP EXPLAINER (Fix 2) ──
+shap_explainer = shap.TreeExplainer(model_overall)
+print("SHAP explainer ready!")
+
+# ── DATASET REPLAY INDEX (Fix 3) ──
+patient_index = [0]
+
+# ─────────────────────────────────────────
+# UTILITY FUNCTIONS
+# ─────────────────────────────────────────
+
+def calculate_debt_score(wait, tat, bed_delay, admission_delay,
+                          transfers, process_steps, loop_count, rework):
     return round(0.15*wait + 0.10*tat + 0.10*bed_delay + 0.05*admission_delay +
-                 0.10*transfers*10 + 0.05*process_steps*5 + 0.05*loop_count*10 + 0.08*rework*10, 2)
+                 0.10*transfers*10 + 0.05*process_steps*5 +
+                 0.05*loop_count*10 + 0.08*rework*10, 2)
 
 def get_severity(score):
     if score < 30: return "HEALTHY"
@@ -45,38 +65,99 @@ def get_severity_color(score):
     elif score < 85: return "orange"
     else: return "red"
 
-def generate_recommendations(doctor_load, bed_occupancy, rework_count, num_transfers, discharge_bi, resource_util, department, debt_score):
+# ── FIX 2: SHAP-DRIVEN RECOMMENDATION ENGINE ──
+def generate_recommendations(data, department, debt_score, shap_values=None, feature_names=None):
     recs = []
-    if doctor_load > 40:
-        recs.append({"priority": 1, "action": f"Assign 2 additional doctors to {department}", "impact_pct": 34, "cost_estimate": 1200, "savings_estimate": round(debt_score * 0.34 * 150, 0), "urgency": "NOW"})
-    if bed_occupancy > 80:
-        recs.append({"priority": 2, "action": "Fast-track pending discharge approvals to free beds", "impact_pct": 22, "cost_estimate": 0, "savings_estimate": round(debt_score * 0.22 * 150, 0), "urgency": "URGENT"})
-    if rework_count > 1:
-        recs.append({"priority": 3, "action": "Assign senior staff to verify data entries in Lab", "impact_pct": 18, "cost_estimate": 800, "savings_estimate": round(debt_score * 0.18 * 150, 0), "urgency": "HIGH"})
-    if num_transfers > 2:
-        recs.append({"priority": 4, "action": "Optimize patient routing - reduce inter-dept transfers", "impact_pct": 15, "cost_estimate": 0, "savings_estimate": round(debt_score * 0.15 * 150, 0), "urgency": "MODERATE"})
-    if discharge_bi > 20:
-        recs.append({"priority": 5, "action": "Automate discharge approval workflow for insurance cases", "impact_pct": 12, "cost_estimate": 400, "savings_estimate": round(debt_score * 0.12 * 150, 0), "urgency": "MODERATE"})
-    if resource_util > 85:
-        recs.append({"priority": 6, "action": f"Open additional counter in {department} during peak hours", "impact_pct": 10, "cost_estimate": 600, "savings_estimate": round(debt_score * 0.10 * 150, 0), "urgency": "LOW"})
+
+    action_map = {
+        'Doctor_Load': ('Assign additional doctors to ' + department, 34, 1200),
+        'Bed_Occupancy_%': ('Fast-track pending discharge approvals to free beds', 22, 0),
+        'Rework_Count': ('Assign senior staff to verify data entries in Lab', 18, 800),
+        'TAT_Min': ('Prioritize pending lab reports immediately', 20, 0),
+        'Num_Transfers': ('Optimize patient routing — reduce inter-dept transfers', 15, 0),
+        'Discharge_Bottleneck_Index': ('Automate discharge approval for insurance cases', 12, 400),
+        'Resource_Utilization_Rate': ('Open additional counter during peak hours', 10, 600),
+        'Loop_Count': ('Eliminate repeated process steps — streamline workflow', 8, 0),
+    }
+
+    urgency_map = {1: 'NOW', 2: 'URGENT', 3: 'HIGH', 4: 'MODERATE', 5: 'LOW'}
+
+    # SHAP-driven recommendations (AI-driven)
+    if shap_values is not None and feature_names is not None:
+        top_features = sorted(
+            zip(feature_names, shap_values),
+            key=lambda x: abs(x[1]),
+            reverse=True
+        )
+        priority = 1
+        for feat, val in top_features:
+            if feat in action_map and val > 0:
+                action, impact, cost = action_map[feat]
+                recs.append({
+                    "priority": priority,
+                    "action": action,
+                    "impact_pct": impact,
+                    "cost_estimate": cost,
+                    "savings_estimate": round(debt_score * (impact/100) * 150, 0),
+                    "urgency": urgency_map.get(priority, 'LOW'),
+                    "driven_by": f"SHAP: {feat} (+{round(val, 3)})"
+                })
+                priority += 1
+                if priority > 5:
+                    break
+
+    # Fallback to rule-based if SHAP unavailable
     if not recs:
-        recs.append({"priority": 1, "action": "Monitor department - no critical intervention needed", "impact_pct": 5, "cost_estimate": 0, "savings_estimate": 0, "urgency": "LOW"})
+        doctor_load = data.get("doctor_load", 0)
+        bed_occupancy = data.get("bed_occupancy", 0)
+        rework_count = data.get("rework_count", 0)
+        num_transfers = data.get("num_transfers", 0)
+        discharge_bi = data.get("discharge_bottleneck_index", 0)
+
+        if doctor_load > 40:
+            recs.append({"priority": 1, "action": action_map['Doctor_Load'][0], "impact_pct": 34, "cost_estimate": 1200, "savings_estimate": round(debt_score*0.34*150, 0), "urgency": "NOW", "driven_by": "Rule: High Doctor Load"})
+        if bed_occupancy > 80:
+            recs.append({"priority": 2, "action": action_map['Bed_Occupancy_%'][0], "impact_pct": 22, "cost_estimate": 0, "savings_estimate": round(debt_score*0.22*150, 0), "urgency": "URGENT", "driven_by": "Rule: High Bed Occupancy"})
+        if rework_count > 1:
+            recs.append({"priority": 3, "action": action_map['Rework_Count'][0], "impact_pct": 18, "cost_estimate": 800, "savings_estimate": round(debt_score*0.18*150, 0), "urgency": "HIGH", "driven_by": "Rule: High Rework"})
+        if num_transfers > 2:
+            recs.append({"priority": 4, "action": action_map['Num_Transfers'][0], "impact_pct": 15, "cost_estimate": 0, "savings_estimate": round(debt_score*0.15*150, 0), "urgency": "MODERATE", "driven_by": "Rule: High Transfers"})
+        if not recs:
+            recs.append({"priority": 1, "action": "Monitor department — no critical intervention needed", "impact_pct": 5, "cost_estimate": 0, "savings_estimate": 0, "urgency": "LOW", "driven_by": "Rule: Normal State"})
+
     return sorted(recs, key=lambda x: x["priority"])
 
+# ── FIX 4: CORRELATION-BASED CASCADE DETECTION ──
 def detect_cascade(tat, bed_delay, admission_delay, wait_time, rework, transfers):
+    input_vals = {
+        'TAT_Min': tat,
+        'Bed_Delay_Min': bed_delay,
+        'Admission_Delay_Min': admission_delay,
+        'Wait_Time_Min': wait_time,
+        'Rework_Count': rework,
+        'Num_Transfers': transfers
+    }
     cascade = []
-    if tat > 60:
-        cascade.append({"stage": "Lab TAT", "delay": tat, "causes": "Discharge Queue Backup", "impact": "HIGH"})
-    if bed_delay > 40:
-        cascade.append({"stage": "Bed Delay", "delay": bed_delay, "causes": "Admission Backlog", "impact": "HIGH"})
-    if admission_delay > 30:
-        cascade.append({"stage": "Admission Delay", "delay": admission_delay, "causes": "OPD Wait Surge", "impact": "MODERATE"})
-    if rework > 1:
-        cascade.append({"stage": "Rework", "delay": rework * 15, "causes": "Repeated Tests + Data Errors", "impact": "MODERATE"})
-    if transfers > 2:
-        cascade.append({"stage": "Transfers", "delay": transfers * 10, "causes": "Department Congestion", "impact": "LOW"})
+    for col, val in input_vals.items():
+        threshold = thresholds_cascade.get(col, 0)
+        if val > threshold:
+            correlated = corr_matrix[col].abs().sort_values(ascending=False)
+            next_stage = correlated.index[1]
+            corr_val = float(correlated.iloc[1])
+            if corr_val > 0.3:
+                cascade.append({
+                    "stage": col.replace('_Min', '').replace('_', ' '),
+                    "delay": round(val, 1),
+                    "causes": next_stage.replace('_Min', '').replace('_', ' '),
+                    "correlation": round(corr_val, 3),
+                    "impact": "HIGH" if corr_val > 0.5 else "MODERATE"
+                })
     root_cause = cascade[0]["stage"] if cascade else "None"
     return {"chain": cascade, "root_cause": root_cause}
+
+# ─────────────────────────────────────────
+# API ROUTES
+# ─────────────────────────────────────────
 
 @app.route("/", methods=["GET"])
 def home():
@@ -111,23 +192,27 @@ def predict_all():
 
         # Module 1 - Admission Delay
         X1 = pd.DataFrame([[visit_hour, day_type, triage_level, doctor_load, staff_ratio, bed_occupancy]],
-                           columns=['Visit_Hour', 'Day_Type', 'Triage_Level', 'Doctor_Load', 'Staff_To_Patient_Ratio', 'Bed_Occupancy_%'])
+                           columns=['Visit_Hour', 'Day_Type', 'Triage_Level', 'Doctor_Load',
+                                    'Staff_To_Patient_Ratio', 'Bed_Occupancy_%'])
         pred_admission = float(model_admission.predict(X1)[0])
 
         # Module 2 - Rework
         X2 = pd.DataFrame([[doctor_load, num_transfers, resource_util, visit_hour, staff_ratio, triage_level]],
-                           columns=['Doctor_Load', 'Num_Transfers', 'Resource_Utilization_Rate', 'Visit_Hour', 'Staff_To_Patient_Ratio', 'Triage_Level'])
+                           columns=['Doctor_Load', 'Num_Transfers', 'Resource_Utilization_Rate',
+                                    'Visit_Hour', 'Staff_To_Patient_Ratio', 'Triage_Level'])
         pred_rework_prob = float(model_rework.predict_proba(X2)[0][1])
         pred_rework_flag = int(model_rework.predict(X2)[0])
 
         # Module 3 - Discharge/Bed Delay
         X3 = pd.DataFrame([[discharge_bi, bed_occupancy, doctor_load, loop_count, downtime, num_steps]],
-                           columns=['Discharge_Bottleneck_Index', 'Bed_Occupancy_%', 'Doctor_Load', 'Loop_Count', 'System_Downtime_Impact', 'Num_Process_Steps'])
+                           columns=['Discharge_Bottleneck_Index', 'Bed_Occupancy_%', 'Doctor_Load',
+                                    'Loop_Count', 'System_Downtime_Impact', 'Num_Process_Steps'])
         pred_discharge = float(model_discharge.predict(X3)[0])
 
         # Module 4 - Transfer Delay
         X4 = pd.DataFrame([[visit_hour, triage_level, doctor_load, num_steps, resource_util, bed_occupancy]],
-                           columns=['Visit_Hour', 'Triage_Level', 'Doctor_Load', 'Num_Process_Steps', 'Resource_Utilization_Rate', 'Bed_Occupancy_%'])
+                           columns=['Visit_Hour', 'Triage_Level', 'Doctor_Load', 'Num_Process_Steps',
+                                    'Resource_Utilization_Rate', 'Bed_Occupancy_%'])
         pred_transfer_prob = float(model_transfer.predict_proba(X4)[0][1])
         pred_transfer_flag = int(model_transfer.predict(X4)[0])
 
@@ -135,23 +220,46 @@ def predict_all():
         X5 = pd.DataFrame([[visit_hour, day_type, triage_level, doctor_load, staff_ratio, resource_util,
                              bed_occupancy, num_transfers, num_steps, loop_count, rework_count,
                              repeated_tests, data_errors, downtime, discharge_bi]],
-                           columns=['Visit_Hour', 'Day_Type', 'Triage_Level', 'Doctor_Load', 'Staff_To_Patient_Ratio',
-                                    'Resource_Utilization_Rate', 'Bed_Occupancy_%', 'Num_Transfers', 'Num_Process_Steps',
-                                    'Loop_Count', 'Rework_Count', 'Repeated_Tests', 'Data_Error_Count',
-                                    'System_Downtime_Impact', 'Discharge_Bottleneck_Index'])
+                           columns=['Visit_Hour', 'Day_Type', 'Triage_Level', 'Doctor_Load',
+                                    'Staff_To_Patient_Ratio', 'Resource_Utilization_Rate',
+                                    'Bed_Occupancy_%', 'Num_Transfers', 'Num_Process_Steps',
+                                    'Loop_Count', 'Rework_Count', 'Repeated_Tests',
+                                    'Data_Error_Count', 'System_Downtime_Impact',
+                                    'Discharge_Bottleneck_Index'])
         pred_overall_prob = float(model_overall.predict_proba(X5)[0][1])
         pred_overall_flag = int(model_overall.predict(X5)[0])
 
+        # Debt Score
         debt_score = calculate_debt_score(wait_time, tat_min, bed_delay, admission_delay,
                                           num_transfers, num_steps, loop_count, rework_count)
         severity = get_severity(debt_score)
         rupee_equivalent = round(debt_score * 150, 0)
 
-        recommendations = generate_recommendations(
-            doctor_load, bed_occupancy, rework_count, num_transfers,
-            discharge_bi, resource_util, department, debt_score)
+        # FIX 2: SHAP-driven recommendations
+        try:
+            shap_vals_rec = shap_explainer.shap_values(X5)[0].tolist()
+            feat_names_rec = X5.columns.tolist()
+        except:
+            shap_vals_rec = None
+            feat_names_rec = None
 
-        cascade = detect_cascade(tat_min, bed_delay, admission_delay, wait_time, rework_count, num_transfers)
+        recommendations = generate_recommendations(
+            {
+                "doctor_load": doctor_load,
+                "bed_occupancy": bed_occupancy,
+                "rework_count": rework_count,
+                "num_transfers": num_transfers,
+                "discharge_bottleneck_index": discharge_bi,
+                "resource_utilization_rate": resource_util
+            },
+            department, debt_score,
+            shap_values=shap_vals_rec,
+            feature_names=feat_names_rec
+        )
+
+        # FIX 4: Correlation-based cascade
+        cascade = detect_cascade(tat_min, bed_delay, admission_delay,
+                                  wait_time, rework_count, num_transfers)
 
         before_after = {
             "before": {
@@ -196,6 +304,7 @@ def predict_all():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
+
 @app.route("/api/departments", methods=["GET"])
 def department_overview():
     df = df_global.copy()
@@ -216,16 +325,15 @@ def department_overview():
     all_df = pd.concat([df, lab_df, pharmacy_df, discharge_df])
     dept_order = ["OPD", "Lab", "Ward", "ICU", "Pharmacy", "Discharge"]
     result = []
-    minute = datetime.datetime.now().minute
     for i, dept in enumerate(dept_order):
         subset = all_df[all_df["Department"] == dept]
         if len(subset) == 0:
             continue
-        score = round(float(subset["Debt_Score"].mean()), 1)
-        avg_wait = round(float(subset["Wait_Time_Min"].mean()), 1)
-        patients = int(subset["Doctor_Load"].mean())
-        variation = math.sin(minute * 0.1 + i) * 4
-        score = round(max(10, min(99, score + variation)), 1)
+        # FIX 3: Use real dataset row instead of average
+        row = subset.sample(1).iloc[0]
+        score = round(float(row["Debt_Score"]), 1)
+        avg_wait = round(float(row["Wait_Time_Min"]), 1)
+        patients = int(row["Doctor_Load"])
         result.append({
             "name": dept,
             "debt_score": score,
@@ -236,6 +344,8 @@ def department_overview():
         })
     return jsonify({"status": "success", "departments": result})
 
+
+# FIX 1: Debt Pulse using real hourly averages
 @app.route("/api/debt-pulse", methods=["GET"])
 def debt_pulse():
     df = df_global.copy()
@@ -245,17 +355,21 @@ def debt_pulse():
         0.10 * df["Num_Transfers"] * 10 + 0.05 * df["Num_Process_Steps"] * 5 +
         0.05 * df["Loop_Count"] * 10 + 0.08 * df["Rework_Count"] * 10
     )
-    hourly = df.groupby("Visit_Hour")["Debt_Score"].mean()
+    hourly_avg = df.groupby("Visit_Hour")["Debt_Score"].mean()
     now = datetime.datetime.now()
+    current_hour = now.hour
     pulse = []
+    # Rolling 60-minute window using real hourly averages
     for i in range(20):
         t = now - datetime.timedelta(minutes=(20 - i) * 3)
-        hour = t.hour
-        base_score = float(hourly.get(hour, hourly.mean()))
-        variation = math.sin(i * 0.5) * 3
-        score = round(max(10, min(99, base_score + variation)), 1)
-        pulse.append({"time": t.strftime("%H:%M"), "debt_score": score})
+        hour = (current_hour - (20 - i) // 4) % 24
+        score = float(hourly_avg.get(hour, hourly_avg.mean()))
+        pulse.append({
+            "time": t.strftime("%H:%M"),
+            "debt_score": round(score, 1)
+        })
     return jsonify({"status": "success", "pulse": pulse})
+
 
 @app.route("/api/peak-hours", methods=["GET"])
 def peak_hours():
@@ -277,12 +391,12 @@ def peak_hours():
         "peak_label": f"{peak_hour}:00 - {peak_hour+1}:00"
     })
 
+
 @app.route("/api/shap", methods=["POST", "OPTIONS"])
 def shap_explain():
     if request.method == "OPTIONS":
         return jsonify({}), 200
     try:
-        import shap
         data = request.json or {}
         visit_hour     = float(data.get("visit_hour", 12))
         day_type       = float(data.get("day_type", 0))
@@ -299,6 +413,7 @@ def shap_explain():
         data_errors    = float(data.get("data_error_count", 0))
         downtime       = float(data.get("system_downtime_impact", 0))
         discharge_bi   = float(data.get("discharge_bottleneck_index", 10))
+
         X = pd.DataFrame([[visit_hour, day_type, triage_level, doctor_load, staff_ratio,
                             resource_util, bed_occupancy, num_transfers, num_steps, loop_count,
                             rework_count, repeated_tests, data_errors, downtime, discharge_bi]],
@@ -308,17 +423,33 @@ def shap_explain():
                                    'Loop_Count', 'Rework_Count', 'Repeated_Tests',
                                    'Data_Error_Count', 'System_Downtime_Impact',
                                    'Discharge_Bottleneck_Index'])
-        explainer = shap.TreeExplainer(model_overall)
-        shap_values = explainer.shap_values(X)
+
+        shap_values = shap_explainer.shap_values(X)
         feature_names = X.columns.tolist()
         shap_vals = shap_values[0].tolist()
         shap_data = sorted(
             [{"feature": f, "value": round(v, 4)} for f, v in zip(feature_names, shap_vals)],
             key=lambda x: abs(x["value"]), reverse=True)
-        return jsonify({"status": "success", "shap_explanation": shap_data[:8],
-                        "base_value": round(float(explainer.expected_value), 4)})
+
+        return jsonify({
+            "status": "success",
+            "shap_explanation": shap_data[:8],
+            "base_value": round(float(shap_explainer.expected_value), 4)
+        })
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
+
+
+# FIX 3: Dataset replay endpoint
+@app.route("/api/live-patient", methods=["GET"])
+def live_patient():
+    idx = patient_index[0] % len(df_global)
+    row = df_global.iloc[idx].to_dict()
+    patient_index[0] += 1
+    row_clean = {k: (float(v) if hasattr(v, 'item') else v)
+                 for k, v in row.items()}
+    return jsonify({"status": "success", "patient": row_clean, "index": idx})
+
 
 if __name__ == "__main__":
     print("Starting HospitalDebt-AI Backend...")
