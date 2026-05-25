@@ -110,29 +110,63 @@ function PredictionCard({ title, value, unit, risk, icon }) {
   );
 }
 
-function DebtGauge({ score, severity }) {
+function DebtGauge({ score, severity, confidence }) {
   const color = SEVERITY_COLORS[severity] || '#ffd700';
+  const pct = Math.min(100, score);
+  const confColor = confidence >= 85 ? '#00ff88' : confidence >= 70 ? '#ffd700' : '#ff8800';
+
   return (
     <div style={{
-      background: '#060d1a', border: `2px solid ${color}`,
-      borderRadius: 16, padding: 20, textAlign: 'center',
+      background: '#060d1a',
+      border: `2px solid ${color}`,
+      borderRadius: 16,
+      padding: 24,
+      textAlign: 'center',
     }}>
-      <div style={{ fontSize: 10, color: '#4a7fa5', letterSpacing: 1, marginBottom: 10 }}>
-        DEBT SCORE
+      <div style={{ fontSize: 11, color: '#4a7fa5', letterSpacing: 1, marginBottom: 12 }}>
+        PROCESS DEBT SCORE
       </div>
-      <div style={{ fontSize: 56, fontWeight: 900, color, lineHeight: 1 }}>{score}</div>
-      <div style={{ fontSize: 13, color, marginTop: 4, fontWeight: 700 }}>{severity}</div>
-      <div style={{ background: '#0a1628', borderRadius: 4, height: 8, marginTop: 14 }}>
+      <div style={{ fontSize: 64, fontWeight: 900, color, lineHeight: 1 }}>{score}</div>
+      <div style={{ fontSize: 14, color, marginTop: 4, fontWeight: 700 }}>{severity}</div>
+      <div style={{ background: '#0a1628', borderRadius: 4, height: 8, marginTop: 16 }}>
         <div style={{
-          width: `${Math.min(100, score)}%`, height: '100%',
-          background: color, borderRadius: 4,
-          boxShadow: `0 0 10px ${color}`, transition: 'width 0.8s ease'
+          width: `${pct}%`, height: '100%', background: color,
+          borderRadius: 4, boxShadow: `0 0 10px ${color}`,
+          transition: 'width 0.8s ease'
         }} />
+      </div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4 }}>
+        <span style={{ fontSize: 10, color: '#1e3a5f' }}>0</span>
+        <span style={{ fontSize: 10, color: '#1e3a5f' }}>100</span>
+      </div>
+      <div style={{
+        marginTop: 16, padding: '10px 14px',
+        background: '#0a1628',
+        border: `1px solid ${confColor}40`,
+        borderRadius: 10
+      }}>
+        <div style={{ fontSize: 10, color: '#4a7fa5', marginBottom: 4, letterSpacing: 1 }}>
+          MODEL CONFIDENCE
+        </div>
+        <div style={{ fontSize: 24, fontWeight: 800, color: confColor }}>
+          {confidence}%
+        </div>
+        <div style={{ background: '#060d1a', borderRadius: 4, height: 4, marginTop: 6 }}>
+          <div style={{
+            width: `${confidence}%`, height: '100%',
+            background: confColor, borderRadius: 4,
+            boxShadow: `0 0 6px ${confColor}`
+          }} />
+        </div>
+        <div style={{ fontSize: 10, color: '#4a7fa5', marginTop: 4 }}>
+          {confidence >= 85 ? 'High confidence — reliable prediction' :
+           confidence >= 70 ? 'Moderate confidence — use with judgment' :
+           'Lower confidence — inputs near model boundary'}
+        </div>
       </div>
     </div>
   );
 }
-
 function PrescriptionCard({ result }) {
   const { recommendations, cascade, department, debt_score, severity } = result;
   const color = SEVERITY_COLORS[severity] || '#ffd700';
@@ -210,11 +244,8 @@ function PrescriptionCard({ result }) {
                 }}>Rx{rec.priority} · {rec.urgency}</span>
               </div>
               <div style={{ fontSize: 13, color: '#ffffff' }}>{rec.action}</div>
-              {rec.cost_estimate > 0 && (
-                <div style={{ fontSize: 11, color: '#4a7fa5', marginTop: 4 }}>
-                  Cost: ₹{rec.cost_estimate}/shift · Savings: ₹{Number(rec.savings_estimate).toLocaleString()}
-                </div>
-              )}
+             
+              
             </div>
             <div style={{ textAlign: 'right', marginLeft: 16 }}>
               <div style={{ fontSize: 20, fontWeight: 800, color: '#00ff88' }}>-{rec.impact_pct}%</div>
@@ -240,8 +271,7 @@ function PrescriptionCard({ result }) {
               ['Admission Delay', `${result.before_after.before.admission_delay} min`],
               ['Discharge Delay', `${result.before_after.before.discharge_delay} min`],
               ['Rework Risk', `${result.before_after.before.rework_risk}%`],
-              ['Est. Loss', `₹${Number(result.before_after.before.rupee_loss).toLocaleString()}`],
-            ].map(([k, v]) => (
+              ].map(([k, v]) => (
               <div key={k} style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
                 <span style={{ fontSize: 12, color: '#4a7fa5' }}>{k}</span>
                 <span style={{ fontSize: 12, color: '#ff6680', fontWeight: 700 }}>{v}</span>
@@ -259,7 +289,6 @@ function PrescriptionCard({ result }) {
               ['Admission Delay', `${result.before_after.after.admission_delay} min`],
               ['Discharge Delay', `${result.before_after.after.discharge_delay} min`],
               ['Rework Risk', `${result.before_after.after.rework_risk}%`],
-              ['Est. Loss', `₹${Number(result.before_after.after.rupee_loss).toLocaleString()}`],
             ].map(([k, v]) => (
               <div key={k} style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
                 <span style={{ fontSize: 12, color: '#4a7fa5' }}>{k}</span>
@@ -274,7 +303,7 @@ function PrescriptionCard({ result }) {
         marginTop: 20, paddingTop: 16, borderTop: '1px solid #1e3a5f',
         fontSize: 11, color: '#1e3a5f', textAlign: 'center'
       }}>
-        Powered by HospitalDebt-AI 🤖 · XGBoost trained on SynHosp-ADT-India Dataset (5000 records)
+        Powered by HospitalDebt-AI 
       </div>
     </div>
   );
@@ -427,7 +456,11 @@ export default function AnalysisPanel() {
             <div>
               <div style={{ display: 'flex', gap: 16, marginBottom: 16, flexWrap: 'wrap' }}>
                 <div style={{ flex: '0 0 170px' }}>
-                  <DebtGauge score={result.debt_score} severity={result.severity} />
+                  <DebtGauge
+                   score={result.debt_score}
+                   severity={result.severity}
+                   confidence={result.predictions.confidence_score}
+           />
                 </div>
                 <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 10 }}>
                   <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
@@ -458,19 +491,6 @@ export default function AnalysisPanel() {
                       risk={result.predictions.overall_risk_probability > 70 ? 'HIGH' :
                             result.predictions.overall_risk_probability > 40 ? 'MODERATE' : 'LOW'}
                       icon="⚠️" />
-                  </div>
-                  <div style={{
-                    background: '#060d1a', border: '1px solid #ff880040',
-                    borderRadius: 12, padding: '12px 16px',
-                    display: 'flex', justifyContent: 'space-between', alignItems: 'center'
-                  }}>
-                    <div>
-                      <div style={{ fontSize: 11, color: '#4a7fa5' }}>ESTIMATED PROCESS DEBT COST</div>
-                      <div style={{ fontSize: 26, fontWeight: 800, color: '#ff8800' }}>
-                        ₹{Number(result.rupee_equivalent).toLocaleString()}
-                      </div>
-                    </div>
-                    <div style={{ fontSize: 30 }}>💸</div>
                   </div>
                 </div>
               </div>

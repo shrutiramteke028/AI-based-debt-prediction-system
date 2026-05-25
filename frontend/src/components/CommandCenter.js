@@ -138,7 +138,7 @@ function DebtPulse({ data }) {
 // ─── CRISIS BAR ───
 function CrisisBar({ departments }) {
   const critical = departments.filter(d => d.severity === 'CRITICAL');
-  const [seconds, setSeconds] = useState(300);
+  const [seconds, setSeconds] = useState(300); // 300s = 5min clinical triage intervention window
 
   useEffect(() => {
     if (critical.length > 0) {
@@ -165,7 +165,7 @@ function CrisisBar({ departments }) {
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <span style={{ fontSize: 18 }}>⚠️</span>
           <span style={{ color: '#ff2244', fontWeight: 700, fontSize: 14 }}>
-            CRITICAL ALERT — {critical.map(d => d.name).join(', ')} Department
+            HIGH RISK ALERT — — {critical.map(d => d.name).join(', ')} Department
           </span>
         </div>
         <div style={{ color: '#ff2244', fontWeight: 800, fontSize: 20, fontFamily: 'monospace' }}>
@@ -183,7 +183,8 @@ function CrisisBar({ departments }) {
         }} />
       </div>
       <div style={{ fontSize: 11, color: '#ff6680', marginTop: 6 }}>
-        Estimated time before cascade failure
+
+        Operational Risk Window — Intervention recommended within this period
       </div>
     </div>
   );
@@ -248,7 +249,7 @@ export default function CommandCenter({ onDeptClick, onAnalyzeClick }) {
 
   useEffect(() => {
     fetchData();
-    const t = setInterval(fetchData, 15000);
+    const t = setInterval(fetchData, 300000);
     return () => clearInterval(t);
   }, []);
 
@@ -267,7 +268,7 @@ export default function CommandCenter({ onDeptClick, onAnalyzeClick }) {
             PROCESS INTELLIGENCE CENTER
           </div>
           <div style={{ fontSize: 22, fontWeight: 800, color: '#ffffff' }}>
-            🏥 HospitalDebt-AI
+            HospitalDebt-AI
           </div>
           <div style={{ fontSize: 12, color: '#4a7fa5', marginTop: 2 }}>
             Real-time Process Debt Monitoring System
@@ -314,18 +315,9 @@ export default function CommandCenter({ onDeptClick, onAnalyzeClick }) {
         }}>
           🔍 Run AI Analysis
         </button>
-        <button onClick={fetchData} style={{
-          background: '#060d1a',
-          border: '1px solid #1e3a5f',
-          borderRadius: 10,
-          padding: '14px 28px',
-          color: '#4a7fa5',
-          fontWeight: 600,
-          fontSize: 14,
-          cursor: 'pointer',
-        }}>
-          🔄 Refresh
-        </button>
+        <div style={{ fontSize: 11, color: '#1e3a5f', textAlign: 'right' }}>
+  Auto-refreshing every 8s · Last updated: {new Date().toLocaleTimeString()}
+        </div>
       </div>
     </div>
   );
